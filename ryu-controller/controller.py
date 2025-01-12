@@ -12,6 +12,7 @@
 # implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import logging
 
 from ryu.base import app_manager
 from ryu.controller import ofp_event
@@ -36,11 +37,22 @@ def load_topoinfo(toponame):
         linkSet.append([u - 1, v - 1])
     return nodeNum, linkSet
 
+# 控制器下发流表，根据（ipv4_src, ipv4_dst, src_port, dst_port）
+
 class Controller(app_manager.RyuApp):
+
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
 
     def __init__(self, *args, **kwargs):
         super(Controller, self).__init__(*args, **kwargs)
+
+        # logging
+        file_handler = logging.FileHandler('./log/ryu.log')
+        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        file_handler.setFormatter(formatter)
+        file_handler.setLevel(logging.INFO)  # 设置日志级别
+        self.logger.addHandler(file_handler)  # 添加 FileHandler 到 logger 中
+
         CONF = cfg.CONF
         CONF.register_opts([
             cfg.StrOpt("toponame", default="test", help=("network topology name"))])
@@ -52,13 +64,15 @@ class Controller(app_manager.RyuApp):
             self.linkset = [[0, 1], [1, 2], [2, 3], [0, 3]]
         else:
             self.node_num, self.linkset = load_topoinfo(self.toponame)
-        print("loading topoinfo finished")
+        print(f"loading {self.toponame} topo info finished")
         # preset topo physic port info, not being used now
         # switch indexed from 1(dpid) while node indexed from 0
         self.link_port = {} # indexed by dpid
+
         for i in range(self.node_num):
             self.link_port[i + 1] = {}
         switch_port_counter = [1] * self.node_num
+
         for link in self.linkset:
             u, v = link
             self.link_port[u + 1][v + 1] = switch_port_counter[u]
@@ -66,6 +80,8 @@ class Controller(app_manager.RyuApp):
             switch_port_counter[u] += 1
             switch_port_counter[v] += 1
         self.switch_host_port = {}
+
+        # 记录交换机和主机连接的端口
         for i in range(self.node_num):
             self.switch_host_port[i + 1] = switch_port_counter[i] 
         
@@ -88,10 +104,13 @@ class Controller(app_manager.RyuApp):
         self.simenv_socket, addr = s.accept()
         print("Connection address:", addr)
 
+
         while len(self.datapaths) < self.node_num:
             hub.sleep(5)
 
         print("Ready to install dynamic rules for requests.")
+
+        # 根据接收到的路径安装流表
         while True:
             msg = self.simenv_socket.recv(BUFFER_SIZE)
             data_js = json.loads(msg.decode('utf-8'))
@@ -101,8 +120,8 @@ class Controller(app_manager.RyuApp):
             dst_port = data_js['dst_port']
             ipv4_src = data_js['ipv4_src']
             ipv4_dst = data_js['ipv4_dst']
-            print("path:", path)
-            
+            # print("path:", path)
+            self.logger.info(f"{path}")
             temp = {}
             for i in range(len(path)):
                 temp[path[i]] = 1
@@ -111,7 +130,9 @@ class Controller(app_manager.RyuApp):
                 datapath = self.datapaths[dpid]
                 ofproto = datapath.ofproto
                 parser = datapath.ofproto_parser
-                match = parser.OFPMatch(ipv4_src=ipv4_src, udp_src=src_port, ipv4_dst=ipv4_dst, udp_dst=dst_port, ip_proto=17, eth_type=0x0800)
+                match = parser.OFPMatch(ipv4_src=ipv4_src, udp_src=src_port,
+                                        ipv4_dst=ipv4_dst, udp_dst=dst_port,
+                                        ip_proto=17, eth_type=0x0800)
                 
                 # delete the ring part of 
                 if i < len(path) - 1 and path[i + 1] in temp:
@@ -121,17 +142,17 @@ class Controller(app_manager.RyuApp):
                 
                 if i == len(path) - 1:
                     out_port = self.switch_host_port[dpid]
+
                 else:
                     out_port = self.link_port[dpid][path[i + 1] + 1]
                 
                 actions = [parser.OFPActionOutput(out_port)]
                 self.add_flow(datapath, self.action_rule_priority, match, actions)
-                
 
             self.simenv_socket.send("Succeeded!".encode())
                 
 
-
+    # 把交换机添加到 datapaths
     '''Set up when the switches connected to Controller'''
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
     def switch_features_handler(self, ev):
@@ -190,7 +211,8 @@ class Controller(app_manager.RyuApp):
 
         eth = pkt.get_protocols(ethernet.ethernet)[0]
         if eth.ethertype == ether_types.ETH_TYPE_LLDP:
-            # ignore lldp packet
+            # 忽略LLDP数据包
+            # LLDP数据包用于邻居发现
             return
 
         dst = eth.dst
@@ -212,7 +234,7 @@ class Controller(app_manager.RyuApp):
                 datapath.send_msg(out)
             return
         
-        self.logger.info("packet in %s %s %s %s", dpid, src, dst, in_port)
+        # self.logger.info("packet in %s %s %s %s", dpid, src, dst, in_port)
 
 
 
