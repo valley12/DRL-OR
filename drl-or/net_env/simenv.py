@@ -3,7 +3,10 @@ author: lcy
 This file provides the python interfaces of the routers simulations environment
 this file do the interactions between ryu+mininet
 '''
+import time
+
 from gym import spaces
+
 if __name__ == "__main__":
     from utils import weight_choice
 else:
@@ -19,8 +22,22 @@ import copy
 import json
 import socket
 import argparse
+import networkx as nx
 
-class Request():
+
+
+# 论文4种不同类型的流量
+# [100Kbps, 1500kbps, 1500kbps, 500kbps]
+
+flow_type = {
+    "latency-sensitive" : 0,
+    "throughput-sensitive" : 1,
+    "latency-throughput-sensitive": 2,
+    "latency-loss-sensitive":3
+}
+
+# 流量请求 源、目的、开始时间、结束时间、带宽需求、服务类型
+class Request:
     def __init__(self, s, t, start_time, end_time, demand, rtype):
         # use open time interval: start_time <= time < end_time
         self.s = s
@@ -47,18 +64,27 @@ class Request():
         return self.end_time < other.end_time
     
     def __str__(self):
-        return "s: %d t: %d\nstart_time: %d\nend_time: %d\ndemand: %d\nrtype: %d" % (self.s, self.t, self.start_time, self.end_time, self.demand, self.rtype)
+        return ("s: %d t: %d\nstart_time: %d\nend_time: %d\ndemand: %d\nrtype: %d"
+                % (self.s, self.t, self.start_time, self.end_time, self.demand, self.rtype))
 
-class NetEnv():
+class NetEnv:
     '''
     must run setup before using other methods
     '''
     def __init__(self, args):
+
         self.args = args
+
+        # 针对不同流量进行区分
+        self.use_qos = False
+        self.use_drl = False
 
         self._observation_spaces = []
         self._action_spaces = []
+
+        # 延迟数据自适应归一化
         self._delay_discounted_factor = 0.99
+        # 丢包数据自适应归一化
         self._loss_discounted_factor = 0.99
 
         # set up communication to remote hosts(mininet host)
@@ -91,12 +117,25 @@ class NetEnv():
         action_spaces: a [node_name] shape list shows the observation spaces for each node, now are Discrete(l)
     '''
     def setup(self, toponame, demand_matrix_name):
+
         self._time_step = 0
+
+        # 流量请求
         self._request_heapq = []
 
         # init DiffServ info
-        self._type_num = 4
-        self._type_dist = np.array([0.2, 0.3, 0.3, 0.2]) # TO BE CHECKED BEFORE EXPERIMENT
+        # 4种不同类型流量
+        # 每种流量类型出现的概率分别为 0.2 0.3 0.3 0.2
+        # 这里也可以设置等概率出现
+        if self.use_qos :
+            self._type_num = 4
+            self._type_dist = np.array([0.2, 0.3, 0.3, 0.2]) # TO BE CHECKED BEFORE EXPERIMENT
+
+        # 不指定流量类型，所有流量同等对待
+        else:
+            # 只设置一种流量类型
+            self._type_num = 1
+            self._type_dist = np.array([1, 1, 1, 1])
 
         # load topo info(direct paragraph)
         if toponame == "test":
@@ -105,10 +144,14 @@ class NetEnv():
             self._observation_spaces = []
             self._action_spaces = []
             # topology info
+            # 边的连接关系
             self._link_lists = [[3, 1], [0, 2], [1, 3], [2, 0]]
             self._shr_dist = [[0, 1, 2, 1], [1, 0, 1, 2], [2, 1, 0, 1], [1, 2, 1, 0]]
+            # 链路容量
             self._link_capa = [[0, 1000, 0, 5000], [1000, 0, 5000, 0], [0, 5000, 0, 5000], [5000, 0, 5000, 0]] # link capacity (Kbps)
+            # 链路使用情况
             self._link_usage = [[0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]] # usage of link capacity
+            # 链路丢包
             self._link_losses = [[0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]] # link losses, x% x is int
             # request generating setting
             # bandwidth aware usually need as large bandwidth as they can, delay-bandwidth aware may have several stage of bandwidth demand
@@ -122,19 +165,30 @@ class NetEnv():
                                    1, 1, 0, 1,
                                    1, 1, 1, 0]
 
+            # 多智能体的状态空间
             for i in self._agent_to_node:
                 # onehot src, onehot dst, neighbour shr dist to each node
                 # low and high for Box isn't essential
-                self._observation_spaces.append(spaces.Box(0., 1., [1 + self._node_num * len(self._link_lists[i]) + self._node_num * len(self._link_lists[i]) + self._node_num ** 2 + self._node_num ** 2 + self._type_num + self._node_num * 2], dtype=np.float32)) # maximum observation space
+                # 源节点的 one-hot编码， 目的节点的 one-hot编码， 服务类型 one-hot 编码和 最大速率
+
+                self._observation_spaces.append(spaces.Box(0., 1.,
+                                                           [1 +
+                                                            self._node_num * len(self._link_lists[i]) +
+                                                            self._node_num * len(self._link_lists[i]) +
+                                                            self._node_num ** 2 + self._node_num ** 2 +
+                                                            self._type_num +
+                                                            self._node_num * 2], dtype=np.float32)) # maximum observation space
                 #self._observation_spaces.append(spaces.Box(0., 1., [1 + len(self._link_lists[i]) + len(self._link_lists[i]) + self._type_num + self._node_num * 2], dtype=np.float32)) # minimum observation space
                 self._action_spaces.append(spaces.Discrete(2))
-            
-        elif toponame == "Abi":
+
+        # 根据网络拓扑名称加载网络拓扑
+        elif toponame in ["Abi", "GEA", "GBN"]:
             self._load_topology(toponame, demand_matrix_name)
-        elif toponame == "GEA":
-            self._load_topology(toponame, demand_matrix_name)
+
         else:
+            print(f"{toponame} not supported.")
             raise NotImplementedError
+
         return self._agent_num, self._node_num, self._observation_spaces, self._action_spaces, self._type_num
 
     '''
@@ -142,13 +196,21 @@ class NetEnv():
     @retval:
         states: [torch.tensor([x, y, ...]), ...]
     '''
+    # 初始化时间步time_step、流量请求、链路使用量、延迟归一化、丢包数据
     def reset(self):
+        # 时间步骤
         self._time_step = 0
+        # 流量请求
         self._request_heapq = []
+        # 链路容量
         self._link_usage = [([0.] * self._node_num) for i in range(self._node_num)]
+        # 延迟归一化
         self._delay_normal = [([1.] * self._node_num) for i in range(self._node_num)]
+        # 丢包归一化
         self._loss_normal = [([1.] * self._node_num) for i in range(self._node_num)]
+
         self._update_state()
+
         return self._request, self._states
     
     '''
@@ -157,8 +219,15 @@ class NetEnv():
         metrics of path including throughput, packet loss 
     '''
     def sim_interact(self, request, path):
+
         # install path in controller
         data_js = {}
+
+        # TCP/UDP 报文头包括源端口和目的端口
+        # IP, 包括源IP地址和目标IP地址
+
+        # 向 controller 发送流表
+        # controller 根据接受到的 path 和 匹配项规则进行流表安装
         data_js['path'] = path
         data_js['ipv4_src'] = "10.0.0.%d" % (request.s + 1)
         data_js['ipv4_dst'] = "10.0.0.%d" % (request.t + 1)
@@ -169,9 +238,13 @@ class NetEnv():
         self.controller_socket.recv(self.BUFFER_SIZE)
         
         # communicate to testbed
+        # 向mininet发送请求在客户端发送流量包
+        # 在服务端接收流量包 并对接收到的数据包进行统计
+
         data_js = {}
         data_js['src'] = int(request.s)
         data_js['dst'] = int(request.t)
+        # 端口号， TCP/UDP 可用端口号分别为 0-65535， 其中知名端口号为 0-1023
         data_js['src_port'] = int(self._time_step % 10000 + 10000)
         data_js['dst_port'] = int(self._time_step % 10000 + 10000) 
         data_js['rtype'] = int(request.rtype)
@@ -179,12 +252,11 @@ class NetEnv():
         data_js['rtime'] = int(request.end_time - request.start_time)
         msg = json.dumps(data_js)
         self.mininet_socket.send(msg.encode())
+
         # get the feedback
         msg = self.mininet_socket.recv(self.BUFFER_SIZE)
         data_js = json.loads(msg)
         return data_js
-        
-
 
     '''
     use action to interact with the environment
@@ -197,16 +269,18 @@ class NetEnv():
         path: [start, x, y, z, ..., end]
     '''
     def step(self, actions, gfactors, simenv=True):
+
         # update
         path = [self._request.s]
         count = 0
         capacity = 1e9
         pre_node = None
+        # 判断生成的路径是否有环路
         circle_flag = 0
         link_flag = [[0] * self._node_num for i in range(self._node_num)]
         node_flag = [0] * self._node_num
         node_flag[self._request.s] = 1
-        while(count < self._node_num):
+        while count < self._node_num:
             curr_node = path[count]
             agent_ind = self._node_to_agent[curr_node]
             if agent_ind != None:
@@ -263,6 +337,7 @@ class NetEnv():
         
         
         # update sim network state
+        # 更新网络状态
         capacity = 1e9
         for i in range(len(path) - 1):
             capacity = min(capacity, max(0, self._link_capa[path[i]][path[i + 1]] - self._link_usage[path[i]][path[i + 1]]))
@@ -270,7 +345,7 @@ class NetEnv():
         capacity = max(capacity, 0)
         self._request.path = copy.copy(path)
         
-        #interact with sim-env(ryu + mininet)
+        # interact with sim-env(ryu + mininet)
         if simenv:
             ret_data = self.sim_interact(self._request, path)
             
@@ -282,15 +357,19 @@ class NetEnv():
             throughput = ret_data['throughput']
             loss_rate = ret_data['loss']
             delay_cut = min(1000, delay) # since 1000 is much larger than common delay
+
+            # 对延迟数据进行自适应归一化
             self._delay_normal[self._request.s][self._request.t] = self._delay_discounted_factor * self._delay_normal[self._request.s][self._request.t] + (1 - self._delay_discounted_factor) * delay_cut
             delay_scaled = delay_cut / self._delay_normal[self._request.s][self._request.t]
             delay_sq = - delay_scaled ** 1
-            
+
+            # 对丢包数据进行自适应归一化
             self._loss_normal[self._request.s][self._request.t] = self._loss_discounted_factor * self._loss_normal[self._request.s][self._request.t] + (1 - self._loss_discounted_factor) * loss_rate
             loss_scaled = loss_rate / (0.01 + self._loss_normal[self._request.s][self._request.t])
             loss_sq = - loss_scaled ** 1
             
             throughput_log = np.log(0.5 + throughput / self._request.demand) #avoid nan
+
         else:
             delay = 0.
             throughput = 0.
@@ -303,14 +382,19 @@ class NetEnv():
         # calc global rwd of the generated path 
         if self._request.rtype == 0:
             global_rwd = 1 * delay_sq
+
         elif self._request.rtype == 1:
             global_rwd =  0. * (delay_sq) + 1 * throughput_log - 0. * min(self._request.demand / (capacity + 1), 1)
+
         elif self._request.rtype == 2:
             global_rwd = 0.5 * delay_sq + 0.5 * throughput_log
+
         else:
             global_rwd = 0.5 * delay_sq + 0.5 * loss_sq
-        # avoid unsafe route 
+
+        # avoid unsafe route
         # fall back policy penalty
+        # 产生路由环路时，给予全局负的奖励，惩罚当前做出的决策
         if circle_flag == 1:
             global_rwd -= 5
         
@@ -336,6 +420,7 @@ class NetEnv():
         # generate new state
         self._time_step += 1
         self._update_state()
+
         return self._states, rewards, path, delta_dist, delta_demand, circle_flag, rtype, global_rwd, delay, throughput_rate, loss_rate
     
     '''
@@ -372,20 +457,27 @@ class NetEnv():
         path: the path node from 
     '''
     def first_agent(self):
+
+        # 加入第一个节点，当前路径的源节点
         path = [self._request.s]
         pre_node = None
         while(1):
             curr_node = path[-1]
+            # 当前节点是目的节点，返回路径
             if curr_node == self._request.t:
                 return None, path
+
+            # 如果当前节点不是由agent控制，结束循环，返回当前的节点和
             if self._node_to_agent[curr_node] != None:
                 break
+
             temp = [None, 1e9]
             for i in self._link_lists[curr_node]:
                 if i != pre_node and self._shr_dist[i][self._request.t] < temp[1]:
                     temp = [i, self._shr_dist[i][self._request.t]]
             path.append(temp[0])
             pre_node = curr_node
+
         return self._node_to_agent[path[-1]], path
 
 
@@ -395,33 +487,53 @@ class NetEnv():
     generate requests and update the state of environment
     '''
     def _update_state(self):
+
         # update env request heapq
         while len(self._request_heapq) > 0 and self._request_heapq[0].end_time <= self._time_step:
             request = heapq.heappop(self._request_heapq)
             path = request.path
-            if path != None:
+            if path is not None:
                 for i in range(len(path) - 1):
                     self._link_usage[path[i]][path[i + 1]] -= request.demand
 
         # generate new request
         nodelist = range(self._node_num)
+
         # uniform sampling
+        # 等概率从节点列表采样2个节点
         #s, t = random.sample(nodelist, 2)
         # sampling according to demand matrix
+
+        # 根据流量矩阵随机选择两个节点产生流量
         ind = weight_choice(self._demand_matrix)
         s = ind // self._node_num
         t = ind % self._node_num
         
         start_time = self._time_step
-        rtype = np.random.choice(list(range(self._type_num)), p=self._type_dist)
-        demand = random.choice(self._request_demands[rtype])
+
+        # 只设置一种流量类型
+        if self._type_num == 1:
+
+            # rtype 设定服务端统计数据包的频次
+            rtype = -1
+
+            # 不设定QoS, 流量请求从 [[100], [1500], [1500], [500]] 中产生
+            demand = random.choice(self._request_demands)[0]
+
+        elif self._type_num == 4:
+            # 从四种服务类型中选择
+            rtype = np.random.choice(list(range(self._type_num)), p=self._type_dist)
+            demand = random.choice(self._request_demands[rtype])
+
         end_time = start_time + random.choice(self._request_times[rtype])
         print("start_time:", start_time, "end_time:", end_time)
 
         self._request = Request(s, t, start_time, end_time, demand, rtype)
+
         heapq.heappush(self._request_heapq, self._request)
 
         # calc wp dist for each node pair
+        # 计算最大带宽的算法
         self._wp_dist = []
         for i in range(self._node_num):
             self._wp_dist.append([])
@@ -440,16 +552,19 @@ class NetEnv():
 
         # generate the output state of environment
         # common state for each agent
+        # 更新链路容量
         link_usage_info = []
         for j in range(self._node_num):
             for k in range(self._node_num):
                 link_usage_info.append(self._link_capa[j][k] - self._link_usage[j][k]) 
-        
+
+        # 更新链路丢包
         link_loss_info = []
         for j in range(self._node_num):
             for k in range(self._node_num):
                 link_loss_info.append(self._link_losses[j][k] / 100) #input linke loss x indicating x%
-        
+
+
         self._states = []
         for i in self._agent_to_node:
             # generate src and dst one hot state
@@ -458,29 +573,35 @@ class NetEnv():
             dst_state = torch.tensor(list(np.eye(self._node_num)[self._request.t]))
             one_hot_state = torch.cat([type_state, src_state, dst_state], 0)
 
+
             # generate neighbors shr distance state
             neighbor_dist_state = []
             for j in self._link_lists[i]:
                 neighbor_dist_state += self._shr_dist[j]
                 #neighbor_dist_state.append(self._shr_dist[j][self._request.t]) #for less state
             neighbor_dist_state = torch.tensor(neighbor_dist_state, dtype=torch.float32)
-            
+
+
             # generate link edge state
             link_usage_state = torch.tensor(link_usage_info, dtype=torch.float32)
-            
+
             # generate link loss state
             link_loss_state = torch.tensor(link_loss_info, dtype=torch.float32)
 
             # generate demand and time state
+            # 这里只添加了 demand 没有添加请求时间状态
             extra_info_state = torch.tensor([self._request.demand], dtype=torch.float32)
+
 
             # generate neighbors widest path state
             neighbor_wp_state = []
+
             for j in self._link_lists[i]:
                 neighbor_wp_state += self._wp_dist[j]
                 #neighbor_wp_state.append(self._wp_dist[j][self._request.t]) #for less state
             neighbor_wp_state = torch.tensor(neighbor_wp_state, dtype=torch.float32)
-            
+
+
             concat_state = torch.cat([extra_info_state, neighbor_wp_state, neighbor_dist_state, link_usage_state, link_loss_state, one_hot_state], 0) # full state
             #concat_state = torch.cat([extra_info_state, neighbor_wp_state, neighbor_dist_state, one_hot_state], 0)  # less state
             self._states.append(concat_state)
@@ -495,6 +616,7 @@ class NetEnv():
         self._demand_matrix = list(map(int, demandfile.readline().split()))
         # the input file is undirected graph while here we use directed graph
         # node id for input file indexed from 1 while here from 0
+        # 节点数量和边数量
         self._node_num, edge_num = list(map(int, topofile.readline().split()))
         self._edge_num = edge_num * 2
         self._observation_spaces = []
@@ -508,13 +630,20 @@ class NetEnv():
         for i in range(edge_num):
             u, v, _, c, loss = list(map(int, topofile.readline().split()))
             # since node index range from 1 to n in input file
+            # 添加每个节点的相邻节点
             self._link_lists[u - 1].append(v - 1)
             self._link_lists[v - 1].append(u - 1)
+
             # undirected graph to directed graph
+            # 添加链路容量
             self._link_capa[u - 1][v - 1] = c
             self._link_capa[v - 1][u - 1] = c
+
+            # 添加链路丢包
             self._link_losses[u - 1][v - 1] = loss
             self._link_losses[v - 1][u - 1] = loss
+
+
         
         # input agent index
         is_agent = list(map(int, topofile.readline().split()))
@@ -526,38 +655,63 @@ class NetEnv():
                 self._agent_to_node.append(i)
         self._agent_num = len(self._agent_to_node)
 
-        # calsulate shortest path distance
+        # calculate shortest path distance
+        # 计算两个点之间的最短路由路径
         self._shr_dist = []
         for i in range(self._node_num):
             self._shr_dist.append([])
             for j in range(self._node_num):
                 if j == i:
+                    # 当前节点的距离为0
                     self._shr_dist[i].append(0)
                 elif j in self._link_lists[i]:
+                    # 邻居节点的距离为1
                     self._shr_dist[i].append(1)
                 else:
+                    # 其他的节点距离为无穷大这里定义为1e6
                     self._shr_dist[i].append(1e6) # inf
+
+        # 计算任意两个点之间的最短距离
         for k in range(self._node_num):
             for i in range(self._node_num):
                 for j in range(self._node_num):
-                    if(self._shr_dist[i][j] > self._shr_dist[i][k] + self._shr_dist[k][j]):
+                    if self._shr_dist[i][j] > self._shr_dist[i][k] + self._shr_dist[k][j]:
                         self._shr_dist[i][j] = self._shr_dist[i][k] + self._shr_dist[k][j] 
         
         # generate observation spaces and action spaces
+        # 生成每个智能体的状态空间和动作空间
         for i in self._agent_to_node:
             # state: extra_state + neighbor_wp + neighbor shr(or least delay) + linkusage + link_losses + onehot type state + onehot src + dst state
-            self._observation_spaces.append(spaces.Box(0., 1., [1 + self._node_num * len(self._link_lists[i]) + self._node_num * len(self._link_lists[i]) + self._node_num ** 2 + self._node_num ** 2 + self._type_num + self._node_num * 2], dtype=np.float32)) # maximum observation state
-            #self._observation_spaces.append(spaces.Box(0., 1., [1 + len(self._link_lists[i]) + len(self._link_lists[i]) + self._type_num + self._node_num * 2], dtype=np.float32)) # only use neighbor state space
+            self._observation_spaces.append(spaces.Box(0., 1.,
+                                                       [1 + self._node_num * len(self._link_lists[i]) +
+                                                        self._node_num * len(self._link_lists[i]) +
+                                                        self._node_num ** 2 +
+                                                        self._node_num ** 2 +
+                                                        self._type_num +
+                                                        self._node_num * 2], dtype=np.float32)) # maximum observation state
+            # self._observation_spaces.append(spaces.Box(0., 1., [1 + len(self._link_lists[i]) + len(self._link_lists[i]) + self._type_num + self._node_num * 2], dtype=np.float32)) # only use neighbor state space
+            # 离散空间，选择下一跳
             self._action_spaces.append(spaces.Discrete(len(self._link_lists[i])))
         
         # TO BE CHECKED BEFORE EXPERIMENT
         # setup flow generating step
         if toponame == "Abi":
+
+            # 4种类型请求请求流量大小
+            # 100kbps、1500kbps、1500kbps、500kbps
             self._request_demands = [[100], [1500], [1500], [500]]
-            self._request_times = [[50], [50], [50], [50]] # heavy load
-            #self._request_times = [[10], [10], [10], [10]] # light load
-            #self._request_times = [[30], [30], [30], [30]] # mid load
+
+            # 随着网络发流时间增加，网络负载增加，延迟增加
+            # self._request_times = [[50], [50], [50], [50]] # heavy load
+            self._request_times = [[10], [10], [10], [10]] # light load
+            # self._request_times = [[20], [20], [20], [20]]
+            # self._request_times = [[30], [30], [30], [30]] # mid load
+            # self._request_times = [[40], [40], [40], [40]]
+
         elif toponame == "GEA":
+
+            # 4种类型请求请求流量大小
+            # 100kbps、1500kbps、1500kbps、500kbps
             self._request_demands = [[100], [1500], [1500], [500]]
             self._request_times = [[15], [15], [15], [15]]
     
@@ -588,9 +742,11 @@ class NetEnv():
                     for j in range(self._node_num):
                         if(self._shr_dist[i][j] > self._shr_dist[i][k] + self._shr_dist[k][j]):
                             self._shr_dist[i][j] = self._shr_dist[i][k] + self._shr_dist[k][j] 
+
         elif msg == "demand_change":
             # from light load to mid load, may be for heavy load in the future
             self._request_times = [[30], [30], [30], [30]]
+
         else:
             raise NotImplementedError
 
@@ -636,13 +792,20 @@ class NetEnv():
         while path[cur_p] != t:
             tmp_dist = 1e6
             next_hop = None
+            # 当前节点path[cur_p]，找到当前节点邻居节点距离目标节点距离最小的点
+            # 这里同时考虑了当前节点和邻居节点的带宽要大于0
+            # 例如当前链路有一条链路为瓶颈链路，发送流量过大时会占用全部带宽
             for i in self._link_lists[path[cur_p]]:
-                if self._shr_dist[i][t] < tmp_dist and self._link_capa[path[cur_p]][i] > 0:
+                # if self._shr_dist[i][t] < tmp_dist and self._link_capa[path[cur_p]][i] > 0:
+                # 只考虑距离不考虑可用带宽
+                if self._shr_dist[i][t] < tmp_dist :
                     next_hop = i
                     tmp_dist = self._shr_dist[i][t]
             path.append(next_hop)
             cur_p += 1
         return path
+
+
     
     '''
     calculating the Bandwidth-Constrained Shortest Path
@@ -686,36 +849,54 @@ class NetEnv():
     method = "SHR"/"WP"/"DS"(diff-serv)
     '''
     def step_baseline(self, method):
+
+        # 最短路由优先
         if method == "SHR":
             path = self.calcSHR(self._request.s, self._request.t)
+
+        # 最大带宽
         elif method == "WP":
             path = self.calcWP(self._request.s, self._request.t)
+
+        # 区分服务
         elif method == "DS":
+
             if self._request.rtype == 0 or self._request.rtype == 3:
                 path = self.calcSHR(self._request.s, self._request.t)
+
             elif self._request.rtype == 1:
                 path = self.calcWP(self._request.s, self._request.t)
+
             else:
                 path = self.calcBCSHR(self._request.s, self._request.t, self._request.demand)
                 if path == None:
                     path = self.calcWP(self._request.s, self._request.t)
+
         elif method == 'QoS':
             path = self.calcBCSHR(self._request.s, self._request.t, self._request.demand)
             if path == None:
                 path = self.calcWP(self._request.s, self._request.t)
+
         else:
             raise NotImplementedError
+
         self._request.path = copy.copy(path)
 
         # update link usage according to the selected path 
         capacity = 1e9
+
+        # 根据计算的路径更新链路容量
         for i in range(len(path) - 1):
             capacity = min(capacity, max(0, self._link_capa[path[i]][path[i + 1]] - self._link_usage[path[i]][path[i + 1]]))
             self._link_usage[path[i]][path[i + 1]] += self._request.demand
+
         count = len(path) - 1
         
         # install rules for path and generate service request in sim-env(ryu + mininet)
+
+        # 生成流量请求、下发流表、得到端到端的统计数据
         ret_data = self.sim_interact(self._request, path)
+
         delay = ret_data['delay']
         throughput = ret_data['throughput']
         loss_rate = ret_data['loss']
@@ -726,12 +907,14 @@ class NetEnv():
         rtype = self._request.rtype
         
         max_link_util = 0.
+
+        # 计算最大带宽利用率
         for i in range(self._node_num):
             for j in range(self._node_num):
                 if self._link_capa[i][j] > 0:
                     max_link_util = max(max_link_util, self._link_usage[i][j] / self._link_capa[i][j])
-        print("max link utility:", max_link_util)
 
+        print("max link utility:", max_link_util)
         # generate new state
         self._time_step += 1
         self._update_state()
@@ -739,18 +922,23 @@ class NetEnv():
 
 
 if __name__ == "__main__":
+
+    # 可以遍历所有的传统方法，计算对应的值
     toponame = sys.argv[1]
     method = sys.argv[2] # baseline method can be SHR | WP | DS | QoS
     num_step = int(sys.argv[3])
+
     if toponame == "Abi":
         demand_matrix = "Abi_500.txt"
-    else:
+
+    elif toponame == "GEA":
         demand_matrix = "GEA_500.txt"
 
     # setup env
     args = None 
     envs = NetEnv(args) 
     num_agent, num_node, observation_spaces, action_spaces, num_type = envs.setup(toponame, demand_matrix)
+    print(f"num_agent:{num_agent}, num_node:{num_node}, num_type:{num_type}")
     envs.reset()
     
     # open log file
@@ -766,6 +954,7 @@ if __name__ == "__main__":
     log_delay_files = []
     log_throughput_files = []
     log_loss_files = []
+
     for i in range(num_type):
         log_dist_file = open("%s/dist_type%d.log" % (log_dir, i), "w", 1)
         log_dist_files.append(log_dist_file)
@@ -778,6 +967,8 @@ if __name__ == "__main__":
         log_loss_file = open("%s/loss_type%d.log" % (log_dir, i), "w", 1)
         log_loss_files.append(log_loss_file)
 
+    start_time = time.time()
+
     for i in range(num_step):
         print("step:", i)
         rtype, delta_dist, delta_demand, delay, throughput_rate, loss_rate = envs.step_baseline(method)
@@ -786,3 +977,6 @@ if __name__ == "__main__":
         print(delay, file=log_delay_files[rtype])
         print(throughput_rate, file=log_throughput_files[rtype]) 
         print(loss_rate, file=log_loss_files[rtype])
+
+    end_time = time.time()
+    print(f"cost time:{end_time - start_time}")
