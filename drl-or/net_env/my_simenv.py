@@ -668,12 +668,13 @@ class NetEnv:
         # 不区分流量类型
         if self.args.service_type_num == 1:
             # [[100], [1500], [1500], [500]] kbps
+            rtype = -1 #不区分类型
             demand = random.choice(self._request_demands)[0]
+
 
         elif self.args.service_type_num == 4:
             # 从四种流量类型随机选择一个 分布概率分别为[0.2, 0.3, 0.3, 0.2]
             rtype = np.random.choice(list(range(self._type_num)), p=self._type_dist)
-            # 需求大小从四种
             # 这里 request_demands已经确定了， 不管 random choice都是一样的
             demand = random.choice(self._request_demands[rtype])
 
@@ -705,6 +706,7 @@ class NetEnv:
                         self._wp_dist[i][j] = min(self._wp_dist[i][k], self._wp_dist[k][j])
 
                         # generate the output state of environment
+
         # common state for each agent
         link_usage_info = []
         for j in range(self._node_num):
@@ -737,8 +739,10 @@ class NetEnv:
                 link_usage_state = torch.tensor(link_usage_info, dtype=torch.float32)
 
                 # generate link loss state
+                # 这里丢包是初始化链路的丢包状态，不是实时的丢包状态
                 link_loss_state = torch.tensor(link_loss_info, dtype=torch.float32)
 
+                # 带宽需求
                 # generate demand and time state
                 extra_info_state = torch.tensor([self._request.demand], dtype=torch.float32)
 
@@ -757,15 +761,21 @@ class NetEnv:
 
         elif self.args.agent_mode == "single_agent":
 
+            # 源节点 src one-hot编码
+            src_state = torch.tensor(list(np.eye(self._node_num)[self._request.s]))
+
+            # 目标节点 dst one-hot编码
+            dst_state = torch.tensor(list(np.eye(self._node_num)[self._request.t]))
+
             # generate link edge state
             link_usage_state = torch.tensor(link_usage_info, dtype=torch.float32)
 
             # generate link loss state
             link_loss_state = torch.tensor(link_loss_info, dtype=torch.float32)
 
-            concat_state = torch.cat([link_usage_state, link_loss_state])
+            concat_state = torch.cat([src_state, dst_state, link_usage_state, link_loss_state])
 
-            self._state = concat_state
+            self._states = concat_state
     '''
     load the topo and setup the environment
     '''
