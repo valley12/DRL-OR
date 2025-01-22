@@ -38,7 +38,6 @@ def load_topoinfo(toponame):
     return nodeNum, linkSet
 
 # 控制器下发流表，根据（ipv4_src, ipv4_dst, src_port, dst_port）
-
 class Controller(app_manager.RyuApp):
 
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]

@@ -237,8 +237,6 @@ class NetEnv:
                 self._single_observation_spaces = spaces.Box(0., 1.,
                                                              [self._node_num ** 2 +
                                                               self._node_num ** 2 +
-                                                              self._node_num ** 2 +
-                                                              self._node_num ** 2 +
                                                               self._node_num * 2], dtype=np.float32)
                 # 两条候选路径
                 self._single_action_spaces = spaces.Discrete(2)
@@ -513,6 +511,7 @@ class NetEnv:
         k_path_list = self.get_k_path(self._request.s, self._request.t)
         path = k_path_list[action]
 
+
         # update sim network state
         # 更新网络状态
         capacity = 1e9
@@ -569,6 +568,8 @@ class NetEnv:
 
         else:
             global_rwd = 0.5 * delay_sq + 0.5 * loss_sq
+
+        return global_rwd
 
 
 
@@ -647,7 +648,7 @@ class NetEnv:
             request = heapq.heappop(self._request_heapq)
             path = request.path
             if path is not None:
-                # 更新链路利用资源
+                # 更新已经被占用链路利用资源
                 for i in range(len(path) - 1):
                     self._link_usage[path[i]][path[i + 1]] -= request.demand
 
@@ -660,6 +661,8 @@ class NetEnv:
 
         # 根据流量矩阵随机选择两个节点产生流量
         ind = weight_choice(self._demand_matrix)
+        # ind 对应流量矩阵一个点
+        # s 对应行，t 对应列
         s = ind // self._node_num
         t = ind % self._node_num
 
@@ -719,8 +722,8 @@ class NetEnv:
                 link_loss_info.append(self._link_losses[j][k] / 100)  # input link loss x indicating x%
 
         if self.args.agent_mode == "multi_agent":
-            self._states = []
 
+            self._states = []
             for i in self._agent_to_node:
                 # generate src and dst one hot state
                 type_state = torch.tensor(list(np.eye(self._type_num)[self._request.rtype]))
@@ -877,8 +880,6 @@ class NetEnv:
             # 源节点的 one-hot编码， 目的节点的 one-hot编码
             self._single_observation_spaces = spaces.Box(0., 1.,
                                                          [self._node_num ** 2 +
-                                                          self._node_num ** 2 +
-                                                          self._node_num ** 2 +
                                                           self._node_num ** 2 +
                                                           self._node_num * 2], dtype=np.float32)
             # k条候选路径

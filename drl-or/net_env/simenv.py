@@ -283,23 +283,29 @@ class NetEnv:
         while count < self._node_num:
             curr_node = path[count]
             agent_ind = self._node_to_agent[curr_node]
-            if agent_ind != None:
+            if agent_ind is not None:
+                # action = actions[agent_ind][0].item()
                 next_hop = self._link_lists[curr_node][actions[agent_ind][0].item()]
             else:
+                # 如不不是由智能体控制，则计算最短路径
                 temp = [None, 1e9]
                 for i in self._link_lists[curr_node]:
                     if i != pre_node and self._shr_dist[i][self._request.t] < temp[1]:
                         temp = [i, self._shr_dist[i][self._request.t]]
                 next_hop = temp[0]
-            
+
+            # 当前链路已经访问过，产生路由环路 标记circle_flag为1
+            # 计算当前节点到目标节点的最短路径
             if link_flag[curr_node][next_hop] == 1:
                 circle_flag = 1
                 path = self.calcSHR(self._request.s, self._request.t)
                 count = len(path) - 1
                 
                 break
+
             else:
                 link_flag[curr_node][next_hop] = 1
+
             # delete ring
             if node_flag[next_hop] == 1:
                 while path[count] != next_hop:
@@ -384,7 +390,7 @@ class NetEnv:
             global_rwd = 1 * delay_sq
 
         elif self._request.rtype == 1:
-            global_rwd =  0. * (delay_sq) + 1 * throughput_log - 0. * min(self._request.demand / (capacity + 1), 1)
+            global_rwd = 0. * delay_sq + 1 * throughput_log - 0. * min(self._request.demand / (capacity + 1), 1)
 
         elif self._request.rtype == 2:
             global_rwd = 0.5 * delay_sq + 0.5 * throughput_log
@@ -514,10 +520,11 @@ class NetEnv:
         # 只设置一种流量类型
         if self._type_num == 1:
 
-            # rtype 设定服务端统计数据包的频次
+            # rtype 可以设定服务端统计数据包的频次
             rtype = -1
 
-            # 不设定QoS, 流量请求从 [[100], [1500], [1500], [500]] 中产生
+            # 不设定QoS, 流量请求从 [[100], [1500], [1500], [500]] 中随机产生
+            # 100kbps、1500kbps、500kbps
             demand = random.choice(self._request_demands)[0]
 
         elif self._type_num == 4:
@@ -544,6 +551,7 @@ class NetEnv:
                     self._wp_dist[i].append(self._link_capa[i][j] - self._link_usage[i][j])
                 else:
                     self._wp_dist[i].append(- 1e6) # testing for heavyload
+
         for k in range(self._node_num):
             for i in range(self._node_num):
                 for j in range(self._node_num):
@@ -562,10 +570,11 @@ class NetEnv:
         link_loss_info = []
         for j in range(self._node_num):
             for k in range(self._node_num):
-                link_loss_info.append(self._link_losses[j][k] / 100) #input linke loss x indicating x%
+                link_loss_info.append(self._link_losses[j][k] / 100) #input link loss x indicating x%
 
 
         self._states = []
+
         for i in self._agent_to_node:
             # generate src and dst one hot state
             type_state = torch.tensor(list(np.eye(self._type_num)[self._request.rtype]))
@@ -699,13 +708,14 @@ class NetEnv:
 
             # 4种类型请求请求流量大小
             # 100kbps、1500kbps、1500kbps、500kbps
+            #
             self._request_demands = [[100], [1500], [1500], [500]]
 
             # 随着网络发流时间增加，网络负载增加，延迟增加
             # self._request_times = [[50], [50], [50], [50]] # heavy load
-            self._request_times = [[10], [10], [10], [10]] # light load
+            # self._request_times = [[10], [10], [10], [10]] # light load
             # self._request_times = [[20], [20], [20], [20]]
-            # self._request_times = [[30], [30], [30], [30]] # mid load
+            self._request_times = [[30], [30], [30], [30]] # mid load
             # self._request_times = [[40], [40], [40], [40]]
 
         elif toponame == "GEA":
@@ -786,14 +796,16 @@ class NetEnv:
     '''
     calculating the Shortest Path from s to t
     '''
+    # 计算两点之间的最短距离
     def calcSHR(self, s, t):
         path = [s]
         cur_p = 0
         while path[cur_p] != t:
             tmp_dist = 1e6
             next_hop = None
-            # 当前节点path[cur_p]，找到当前节点邻居节点距离目标节点距离最小的点
-            # 这里同时考虑了当前节点和邻居节点的带宽要大于0
+            # 当前节点path[cur_p]，当前节点和邻居节点的距离为1
+            # 找到当前节点 的邻居节点 距离目标节点距离最小的点
+            # 这里同时考虑了当前节点和邻居节点的带宽要大于0（也可以不考虑）
             # 例如当前链路有一条链路为瓶颈链路，发送流量过大时会占用全部带宽
             for i in self._link_lists[path[cur_p]]:
                 # if self._shr_dist[i][t] < tmp_dist and self._link_capa[path[cur_p]][i] > 0:
@@ -809,7 +821,12 @@ class NetEnv:
     
     '''
     calculating the Bandwidth-Constrained Shortest Path
+        找出从源节点 s 到目标节点 t 的路径，该路径：
+    
+        满足每条边的剩余带宽都不小于指定需求 demand。
+        在满足带宽限制的前提下，路径跳数最少。
     '''
+    #
     def calcBCSHR(self, s, t, demand):
         fat = [-1] * self._node_num
         SHR_dist = [1e6] * self._node_num
@@ -872,6 +889,7 @@ class NetEnv:
                 if path == None:
                     path = self.calcWP(self._request.s, self._request.t)
 
+        #
         elif method == 'QoS':
             path = self.calcBCSHR(self._request.s, self._request.t, self._request.demand)
             if path == None:
@@ -942,7 +960,7 @@ if __name__ == "__main__":
     envs.reset()
     
     # open log file
-    log_dir = "../log/%s_%s_%d_simenv_heavyload_1-5loss/" % (toponame, method, num_step)
+    log_dir = "../log/%s_%s_%d_simenv_30_timeslot_1-5loss/" % (toponame, method, num_step)
     try:
         os.makedirs(log_dir)
     except OSError:
@@ -968,7 +986,6 @@ if __name__ == "__main__":
         log_loss_files.append(log_loss_file)
 
     start_time = time.time()
-
     for i in range(num_step):
         print("step:", i)
         rtype, delta_dist, delta_demand, delay, throughput_rate, loss_rate = envs.step_baseline(method)
@@ -977,6 +994,5 @@ if __name__ == "__main__":
         print(delay, file=log_delay_files[rtype])
         print(throughput_rate, file=log_throughput_files[rtype]) 
         print(loss_rate, file=log_loss_files[rtype])
-
     end_time = time.time()
     print(f"cost time:{end_time - start_time}")

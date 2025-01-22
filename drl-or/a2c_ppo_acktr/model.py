@@ -9,11 +9,13 @@ from a2c_ppo_acktr.utils import init
 class Policy(nn.Module):
     def __init__(self, obs_shape, action_space, condition_space, node_num=None, type_num=None, base=None, base_kwargs=None):
         super(Policy, self).__init__()
+
         self._node_num = node_num
         self._type_num = type_num
 
         if base_kwargs is None:
             base_kwargs = {}
+
         if base is None:
             base = MLPBase
         

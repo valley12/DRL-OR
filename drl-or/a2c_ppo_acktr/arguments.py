@@ -50,9 +50,10 @@ def get_args():
                         help='number of pretraining steps  (default: 500)')
     parser.add_argument('--num-pretrain-steps', type=int, default=128,
                         help='number of forward steps for pretraining (default: 128)')
+    # 每训练 10000 步保存下模型
     parser.add_argument('--ckpt-steps', type=int, default=10000,
                         help='number of iteration steps for each checkpoint when training')
-    parser.add_argument('--num-env-steps', type=int, default=10000000,
+    parser.add_argument('--num-env-steps', type=int, default=1000000,
                         help='number of environment steps to train (default: 1000000)')
     parser.add_argument('--env-name', default='Abi',
                         help='environment to train on (default: Abi)') #temporarily deprecated

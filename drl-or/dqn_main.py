@@ -19,7 +19,7 @@ def get_args():
     parser.add_argument('--agent_mode', type=str, default="single_agent",
                         help='agent mode(single agent or multi agent)')
     # 单智能体的动作空间
-    parser.add_argument('--k_path_num', type=int, default=5,
+    parser.add_argument('--k_path_num', type=int, default=4,
                         help='k candidate path for src to route all paths')
 
     # 是否区分不同类型的流量，当type为1时不区分流量，主要是针对强化学习的奖励函数设计
@@ -74,13 +74,20 @@ def main():
         print(f"agent observation_space {observation_space}, action spaces {action_space}")
         state_size = observation_space.shape[0]
         action_size = action_space.n
+
         agent = DQNAgent(state_size=state_size, action_size=action_size)
+        # 预训练 基于最短路径 预训练 不与 Ryu和Mininet交互
         # 初始化环境
         request, obses = env.reset()
 
+        # 在线训练 与Ryu和Mininet交互
+        # 初始化环境
+        request, obses = env.reset()
         print(f"request s:{request.s}, request t:{request.t}, obses:{obses.shape}")
         action = agent.choose_action(obses)
-        env.step_single_agent(action, simenv=True)
+        print(f"action: {action}")
+        path = env.step_single_agent(action, simenv=True)
+        print(f"path: {path}")
 
     elif args.agent_mode == "multi_agent":
         num_agent, num_node, observation_spaces, action_spaces, num_type = env.setup(args.env_name, args.demand_matrix)
